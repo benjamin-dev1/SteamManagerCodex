@@ -35,44 +35,42 @@ class SteamManagerApp:
         self.saved_appearance_mode = 'system'
         self.config_error = None
 
-        # New settings:
+        # New settings.
         self.run_on_startup = False
         self.luma_toggled = False      # False: original names; True: files renamed (with a "1")
         self.debug_mode = True         # Controls whether the activity log is shown
         self.minimalist_mode = False   # When True, only the sidebar is visible
-        self.exit_to_tray = True       # When True, closing the window minimizes to tray; when False, it exits
+        self.exit_to_tray = True       # When True, closing minimizes to tray; when False, it exits
+        self.auto_dark_mode = False    # When True, automatically switch dark/light based on time
 
-        # Log widget references.
+        # Logging.
         self.log_text = None
-        self.log_frame = None  # To hold the frame containing the activity log
+        self.log_frame = None
+        self.log_history = []  # Keep last 50 log messages
 
-        # Cache for Steam app name lookups.
+        # Caches.
         self.appid_cache = {}
-
-        # Cache for full app list (for search).
         self.full_app_list = None
         self.full_app_list_lower = None
 
-        # Library items list; each item is a dict with keys: "path", "name", "favorite", "date_added".
+        # Library.
         self.library_items = []
         self.show_favorites_only = False
-        self.library_sort_method = "name"  # Options: "name" or "date"
+        self.library_sort_method = "name"  # "name" or "date"
 
-        # Auto-refresh manifest settings.
-        self.auto_refresh_enabled = False
-        self.auto_refresh_interval = 60  # in minutes
+        # (Auto-refresh features have been removed.)
 
-        # Load configuration and library.
         self.load_config()
         self.load_library()
 
-        # Set appearance and theme.
         ctk.set_appearance_mode(self.saved_appearance_mode)
         ctk.set_default_color_theme(self.saved_theme)
 
+        if self.auto_dark_mode:
+            self.update_theme_by_time()
+
         # Initialize main window.
         self.root = ctk.CTk()
-        # If minimalist mode is enabled, set a narrow width.
         if self.minimalist_mode:
             self.root.geometry("260x600")
         else:
@@ -82,22 +80,17 @@ class SteamManagerApp:
         self.sidebar_frame = None
         self.content_frame = None
 
-        # Override the window close button.
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Setup system tray icon.
         self.tray_icon = None
         self.tray_thread = None
         self.setup_tray_icon()
-
-        if self.auto_refresh_enabled:
-            self.auto_refresh_manifest()
 
         self.show_loading_screen()
         self.root.mainloop()
 
     # ───────────────────────────────
-    # CONFIGURATION METHODS
+    # CONFIGURATION & LIBRARY
     # ───────────────────────────────
     def load_config(self):
         if os.path.exists(self.config_file):
@@ -108,12 +101,11 @@ class SteamManagerApp:
                 self.saved_paths = extra.split('|') if extra else []
                 self.saved_theme = self.config['Settings'].get('theme', 'dark-blue')
                 self.saved_appearance_mode = self.config['Settings'].get('appearance_mode', 'system')
-                self.auto_refresh_enabled = self.config['Settings'].getboolean('auto_refresh_enabled', False)
-                self.auto_refresh_interval = self.config['Settings'].getint('auto_refresh_interval', 60)
                 self.run_on_startup = self.config['Settings'].getboolean('run_on_startup', False)
                 self.debug_mode = self.config['Settings'].getboolean('debug_mode', True)
                 self.minimalist_mode = self.config['Settings'].getboolean('minimalist_mode', False)
                 self.exit_to_tray = self.config['Settings'].getboolean('exit_to_tray', True)
+                self.auto_dark_mode = self.config['Settings'].getboolean('auto_dark_mode', False)
             except (configparser.Error, KeyError):
                 self.config_error = "Config file is corrupted."
         else:
@@ -125,6 +117,7 @@ class SteamManagerApp:
             self.debug_mode = True
             self.minimalist_mode = False
             self.exit_to_tray = True
+            self.auto_dark_mode = False
 
     def save_config(self, main_path=None, extra_paths=None, theme=None, appearance_mode=None):
         if not self.config.has_section('Paths'):
@@ -139,18 +132,14 @@ class SteamManagerApp:
             self.config['Settings']['theme'] = theme
         if appearance_mode is not None:
             self.config['Settings']['appearance_mode'] = appearance_mode
-        self.config['Settings']['auto_refresh_enabled'] = str(self.auto_refresh_enabled)
-        self.config['Settings']['auto_refresh_interval'] = str(self.auto_refresh_interval)
         self.config['Settings']['run_on_startup'] = str(self.run_on_startup)
         self.config['Settings']['debug_mode'] = str(self.debug_mode)
         self.config['Settings']['minimalist_mode'] = str(self.minimalist_mode)
         self.config['Settings']['exit_to_tray'] = str(self.exit_to_tray)
+        self.config['Settings']['auto_dark_mode'] = str(self.auto_dark_mode)
         with open(self.config_file, 'w') as configfile:
             self.config.write(configfile)
 
-    # ───────────────────────────────
-    # LIBRARY PERSISTENCE
-    # ───────────────────────────────
     def load_library(self):
         if os.path.exists(LIBRARY_FILE):
             try:
@@ -169,28 +158,75 @@ class SteamManagerApp:
         except Exception as e:
             self.log(f"Error saving library: {str(e)}")
 
-    def import_library(self):
-        filename = filedialog.askopenfilename(title="Import Library", filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")])
-        if not filename:
+    # ───────────────────────────────
+    # LOGGING & RECENT ACTIVITIES
+    # ───────────────────────────────
+    def log(self, message):
+        if not self.debug_mode:
             return
-        if filename.lower().endswith(".json"):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_message = f"{timestamp}: {message}\n"
+        self.log_history.append(log_message)
+        if len(self.log_history) > 50:
+            self.log_history = self.log_history[-50:]
+        if self.log_text is not None:
             try:
-                with open(filename, "r", encoding="utf-8") as f:
-                    imported = json.load(f)
-                existing_paths = {item["path"] for item in self.library_items}
-                for item in imported:
-                    if item.get("path") not in existing_paths:
-                        self.library_items.append(item)
-                self.update_library_display()
-                self.save_library()
-                messagebox.showinfo("Import", "Library imported successfully from JSON.")
-                self.log(f"Imported library from {filename} (JSON)")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to import library: {str(e)}")
-                self.log(f"Error importing library from JSON: {str(e)}")
-        elif filename.lower().endswith(".csv"):
-            self.import_csv_library()
+                if self.log_text.winfo_exists():
+                    self.log_text.insert("end", log_message)
+                    self.log_text.yview("end")
+                else:
+                    self.log_text = None
+            except Exception:
+                print(log_message)
+        else:
+            print(log_message)
 
+    def view_recent_activities(self):
+        recent_win = ctk.CTkToplevel(self.root)
+        recent_win.title("Recent Activities")
+        recent_win.geometry("400x300")
+        text_box = ctk.CTkTextbox(recent_win)
+        text_box.pack(fill="both", expand=True)
+        recent_logs = self.log_history[-10:]
+        for log in recent_logs:
+            text_box.insert("end", log)
+        text_box.configure(state="disabled")
+
+    # ───────────────────────────────
+    # INNOVATIVE FEATURES: AUTO DARK MODE & RESET SETTINGS & CLEAR CACHE
+    # ───────────────────────────────
+    def update_theme_by_time(self):
+        # Switch to dark mode between 6pm and 6am; light otherwise.
+        current_hour = datetime.now().hour
+        if current_hour >= 18 or current_hour < 6:
+            ctk.set_appearance_mode("dark")
+        else:
+            ctk.set_appearance_mode("light")
+
+    def set_auto_dark_mode(self, choice):
+        self.auto_dark_mode = (choice == "On")
+        self.save_config()
+        self.update_theme_by_time()
+
+    def reset_settings(self):
+        self.saved_theme = 'dark-blue'
+        self.saved_appearance_mode = 'system'
+        self.run_on_startup = False
+        self.debug_mode = True
+        self.minimalist_mode = False
+        self.exit_to_tray = True
+        self.auto_dark_mode = False
+        self.luma_toggled = False
+        self.save_config(main_path=self.saved_main_path, extra_paths=self.saved_paths)
+        self.initialize_main_window()
+
+    def clear_cache(self):
+        self.appid_cache = {}
+        self.log("Cache cleared.")
+
+    # ───────────────────────────────
+    # MISSING CSV IMPORT METHOD
+    # ───────────────────────────────
     def import_csv_library(self):
         filename = filedialog.askopenfilename(title="Import Library CSV", filetypes=[("CSV files", "*.csv")])
         if not filename:
@@ -217,79 +253,6 @@ class SteamManagerApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to import library CSV: {str(e)}")
             self.log(f"Error importing library CSV: {str(e)}")
-
-    # ───────────────────────────────
-    # LOGGING (Check if widget exists)
-    # ───────────────────────────────
-    def log(self, message):
-        if not self.debug_mode:
-            return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_message = f"{timestamp}: {message}\n"
-        if self.log_text is not None:
-            try:
-                if self.log_text.winfo_exists():
-                    self.log_text.insert("end", log_message)
-                    self.log_text.yview("end")
-                else:
-                    self.log_text = None
-            except Exception:
-                print(log_message)
-        else:
-            print(log_message)
-
-    # ───────────────────────────────
-    # STEAM API METHODS
-    # ───────────────────────────────
-    def get_game_name(self, appid):
-        if appid in self.appid_cache:
-            return self.appid_cache[appid]
-        url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
-        try:
-            response = requests.get(url, timeout=5)
-            data = response.json()
-            if data.get(appid, {}).get("success", False):
-                game_name = data[appid]["data"].get("name", "Unknown")
-            else:
-                game_name = "Unknown"
-        except Exception as e:
-            self.log(f"Error fetching game name for AppID {appid}: {str(e)}")
-            game_name = "Unknown"
-        self.appid_cache[appid] = game_name
-        return game_name
-
-    def get_app_details(self, appid):
-        try:
-            url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
-            r = requests.get(url, timeout=5)
-            data = r.json()
-            if data.get(appid, {}).get("success", False):
-                return data[appid]["data"]
-        except Exception as e:
-            self.log(f"Error fetching details for AppID {appid}: {str(e)}")
-        return {}
-
-    def search_game_by_exe(self, query):
-        try:
-            url = f"https://store.steampowered.com/api/storesearch/?term={query}&l=english"
-            r = requests.get(url, timeout=5)
-            data = r.json()
-            if data.get("total", 0) > 0 and data.get("items"):
-                item = data["items"][0]
-                return {"id": item.get("id"), "name": item.get("name"), "header_image": item.get("header_image")}
-            else:
-                return None
-        except Exception as e:
-            self.log(f"Error searching store for query {query}: {str(e)}")
-            return None
-
-    # ───────────────────────────────
-    # AUTO-REFRESH MANIFEST FEATURE
-    # ───────────────────────────────
-    def auto_refresh_manifest(self):
-        if self.auto_refresh_enabled:
-            self.manifest_adder()
-            self.root.after(self.auto_refresh_interval * 60000, self.auto_refresh_manifest)
 
     # ───────────────────────────────
     # SPLASH & ERROR WINDOWS
@@ -372,7 +335,6 @@ class SteamManagerApp:
         else:
             messagebox.showerror("Error", "Invalid folder selected.")
 
-    # New: Add manifest folder from sidebar.
     def add_manifest_folder(self):
         folder_path = filedialog.askdirectory(title="Select Additional Manifest Folder")
         if folder_path and os.path.exists(folder_path):
@@ -390,69 +352,71 @@ class SteamManagerApp:
             messagebox.showerror("Error", "Invalid folder selected.")
 
     # ───────────────────────────────
-    # MAIN UI INITIALIZATION
+    # MAIN UI INITIALIZATION (with Top Bar for Donate)
     # ───────────────────────────────
     def initialize_main_window(self):
         for widget in self.root.winfo_children():
             widget.destroy()
 
-        # Add Donate button in the top right.
-        donate_button = ctk.CTkButton(self.root, text="Donate", fg_color="orange", command=self.donate, width=100, height=30)
-        donate_button.place(relx=1.0, rely=0.0, anchor="ne", x=-5, y=5)
+        # Top bar.
+        top_bar = ctk.CTkFrame(self.root, height=40, fg_color="transparent")
+        top_bar.pack(side="top", fill="x")
+        donate_button = ctk.CTkButton(top_bar, text="Donate", fg_color="orange",
+                                      command=self.donate, width=100, height=30)
+        donate_button.pack(side="right", padx=10, pady=5)
 
         # Sidebar.
         self.sidebar_frame = ctk.CTkFrame(self.root, width=240, corner_radius=10)
         self.sidebar_frame.pack(side="left", fill="y", padx=10, pady=10)
-        ctk.CTkLabel(self.sidebar_frame, text="Steam Control", font=("Helvetica", 16, "bold")).pack(pady=(10, 5))
+        ctk.CTkLabel(self.sidebar_frame, text="Steam Control", font=("Helvetica", 16, "bold")).pack(pady=(10,5))
         ctk.CTkButton(self.sidebar_frame, text="Open Steam", command=self.open_steam, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Close Steam", command=self.close_steam, width=200).pack(pady=2)
-        ctk.CTkLabel(self.sidebar_frame, text="Manifest Operations", font=("Helvetica", 16, "bold")).pack(pady=(10, 5))
+        ctk.CTkLabel(self.sidebar_frame, text="Manifest Operations", font=("Helvetica", 16, "bold")).pack(pady=(10,5))
         ctk.CTkButton(self.sidebar_frame, text="Refresh Manifests", command=self.manifest_adder, width=200).pack(pady=2)
-        ctk.CTkButton(self.sidebar_frame, text="Toggle Luma", command=self.toggle_luma, width=200).pack(pady=2)
+        
         ctk.CTkButton(self.sidebar_frame, text="Open Manifest Folder", command=self.open_manifest_folder, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Add Manifest Folder", command=self.add_manifest_folder, width=200).pack(pady=2)
-        ctk.CTkLabel(self.sidebar_frame, text="Game Management", font=("Helvetica", 16, "bold")).pack(pady=(10, 5))
+        ctk.CTkLabel(self.sidebar_frame, text="Game Management", font=("Helvetica", 16, "bold")).pack(pady=(10,5))
         ctk.CTkButton(self.sidebar_frame, text="View Installed Games", command=self.view_installed_games, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Search Game", command=self.search_game, width=200).pack(pady=2)
-        ctk.CTkButton(self.sidebar_frame, text="Library", command=self.library_window, width=200).pack(pady=2)
-        ctk.CTkLabel(self.sidebar_frame, text="Settings", font=("Helvetica", 16, "bold")).pack(pady=(10, 5))
+        ctk.CTkButton(self.sidebar_frame, text="Recent Activities", command=self.view_recent_activities, width=200).pack(pady=2)
+        ctk.CTkLabel(self.sidebar_frame, text="Settings", font=("Helvetica", 16, "bold")).pack(pady=(10,5))
         ctk.CTkButton(self.sidebar_frame, text="Settings", command=self.config_window, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Tutorial", command=self.tutorial_window, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Exit", command=self.exit_app, width=200).pack(pady=2)
 
-        # Main content area (if not in Minimalist Mode).
+        # Main content area (if not Minimalist Mode).
         if not self.minimalist_mode:
             self.content_frame = ctk.CTkFrame(self.root, corner_radius=10)
             self.content_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
             ctk.CTkLabel(self.content_frame, text="Steam Manager", font=("Helvetica", 24, "bold")).pack(pady=20)
-            ctk.CTkLabel(self.content_frame, text="Main Steam Path:", font=("Helvetica", 16)).pack(pady=(10, 5))
+            ctk.CTkLabel(self.content_frame, text="Main Steam Path:", font=("Helvetica", 16)).pack(pady=(10,5))
             main_path_text = self.saved_main_path if self.saved_main_path else "No path set"
             main_path_color = "green" if self.saved_main_path else "red"
-            ctk.CTkLabel(self.content_frame, text=main_path_text, text_color=main_path_color, font=("Helvetica", 14)).pack(pady=(0, 10))
-            ctk.CTkLabel(self.content_frame, text="Additional Manifest Paths:", font=("Helvetica", 16)).pack(pady=(10, 5))
+            ctk.CTkLabel(self.content_frame, text=main_path_text, text_color=main_path_color, font=("Helvetica", 14)).pack(pady=(0,10))
+            ctk.CTkLabel(self.content_frame, text="Additional Manifest Paths:", font=("Helvetica", 16)).pack(pady=(10,5))
             if self.saved_paths:
                 scroll_frame = ctk.CTkScrollableFrame(self.content_frame, height=150)
                 scroll_frame.pack(pady=5, padx=5, fill="both", expand=True)
                 for path in self.saved_paths:
                     frame = ctk.CTkFrame(scroll_frame)
                     frame.pack(fill="x", pady=2, padx=5)
-                    ctk.CTkLabel(frame, text=path, font=("Helvetica", 12)).pack(side="left", padx=(5, 0))
+                    ctk.CTkLabel(frame, text=path, font=("Helvetica", 12)).pack(side="left", padx=(5,0))
                     remove_btn = ctk.CTkButton(frame, text="Remove", command=lambda p=path: self.remove_manifest_path(p), width=80)
                     remove_btn.pack(side="right", padx=5)
             else:
                 ctk.CTkLabel(self.content_frame, text="No extra paths set", font=("Helvetica", 12)).pack(pady=5)
             if self.debug_mode:
                 self.log_frame = ctk.CTkFrame(self.content_frame, corner_radius=10)
-                self.log_frame.pack(fill="both", expand=True, pady=(10, 0), padx=5)
-                ctk.CTkLabel(self.log_frame, text="Activity Log:", font=("Helvetica", 14)).pack(pady=(5, 0))
+                self.log_frame.pack(fill="both", expand=True, pady=(10,0), padx=5)
+                ctk.CTkLabel(self.log_frame, text="Activity Log:", font=("Helvetica", 14)).pack(pady=(5,0))
                 self.log_text = ctk.CTkTextbox(self.log_frame, width=600, height=150)
-                self.log_text.pack(pady=(5, 5), padx=5, fill="both", expand=True)
-                ctk.CTkButton(self.log_frame, text="Clear Log", command=self.clear_log).pack(pady=(0, 5))
+                self.log_text.pack(pady=(5,5), padx=5, fill="both", expand=True)
+                ctk.CTkButton(self.log_frame, text="Clear Log", command=self.clear_log).pack(pady=(0,5))
             else:
                 self.log_text = None
                 self.log_frame = None
         else:
-            # Minimalist Mode: only sidebar is visible.
             self.root.geometry("260x600")
         self.log("Main window initialized.")
 
@@ -470,7 +434,7 @@ class SteamManagerApp:
             self.log("Log cleared.")
 
     # ───────────────────────────────
-    # SYSTEM TRAY INTEGRATION & EXIT BEHAVIOR
+    # SYSTEM TRAY & EXIT BEHAVIOR
     # ───────────────────────────────
     def on_closing(self):
         if self.exit_to_tray:
@@ -863,6 +827,8 @@ class SteamManagerApp:
         return max(existing) + 1 if existing else 1
 
     def library_window(self):
+        # The "Library" button is removed from the main window.
+        # In Settings, a button labeled "Open Library (experimental)" will be provided.
         lib_win = ctk.CTkToplevel(self.root)
         lib_win.title("Game Library")
         lib_win.geometry("600x600")
@@ -1073,56 +1039,74 @@ class SteamManagerApp:
             return None
 
     # ───────────────────────────────
-    # SETTINGS WINDOW WITH ADVANCED OPTIONS DROPDOWN
+    # SETTINGS WINDOW WITH ADVANCED OPTIONS (Buttons arranged side by side)
     # ───────────────────────────────
     def config_window(self):
         config_win = ctk.CTkToplevel(self.root)
         config_win.title("Settings")
-        config_win.geometry("400x550")
+        config_win.geometry("450x550")
         config_win.attributes('-topmost', True)
         config_win.grab_set()
-        ctk.CTkLabel(config_win, text="Appearance Mode:", font=("Helvetica", 14)).pack(pady=10)
-        appearance_option = ctk.CTkOptionMenu(config_win, values=["System", "Light", "Dark"],
+
+        # Appearance & Theme options.
+        top_frame = ctk.CTkFrame(config_win)
+        top_frame.pack(pady=10, fill="x")
+        ctk.CTkLabel(top_frame, text="Appearance Mode:", font=("Helvetica", 14)).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        appearance_option = ctk.CTkOptionMenu(top_frame, values=["System", "Light", "Dark"],
                                                command=lambda mode: self.change_appearance_mode(mode))
         appearance_option.set(self.saved_appearance_mode.capitalize())
-        appearance_option.pack(pady=5)
-        ctk.CTkLabel(config_win, text="Select Theme:", font=("Helvetica", 14)).pack(pady=10)
-        theme_option = ctk.CTkOptionMenu(config_win, values=["dark-blue", "green", "blue"],
+        appearance_option.grid(row=0, column=1, padx=5, pady=5)
+        ctk.CTkLabel(top_frame, text="Select Theme:", font=("Helvetica", 14)).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        theme_option = ctk.CTkOptionMenu(top_frame, values=["dark-blue", "green", "blue"],
                                           command=lambda theme: self.change_theme(theme))
         theme_option.set(self.saved_theme)
-        theme_option.pack(pady=5)
-        ctk.CTkLabel(config_win, text="Add Manifest Folder:", font=("Helvetica", 14)).pack(pady=10)
-        ctk.CTkButton(config_win, text="Add Folder", command=lambda: self.open_folder(config_win, is_main_path=False)).pack(pady=5)
-        # Advanced Options Dropdown
+        theme_option.grid(row=1, column=1, padx=5, pady=5)
+
+        # Manifest Folder option.
+        manifest_frame = ctk.CTkFrame(config_win)
+        manifest_frame.pack(pady=5, fill="x")
+        ctk.CTkLabel(manifest_frame, text="Add Manifest Folder:", font=("Helvetica", 14)).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(manifest_frame, text="Add Folder", command=lambda: self.open_folder(config_win, is_main_path=False)).grid(row=0, column=1, padx=5, pady=5)
+
+        # Advanced Options (collapsible).
         self.advanced_options_visible = False
         self.advanced_options_frame = ctk.CTkFrame(config_win)
         self.advanced_options_button = ctk.CTkButton(config_win, text="Show Advanced Options ▾", command=self.toggle_advanced_options)
         self.advanced_options_button.pack(pady=5)
-        # Auto Refresh options.
-        ctk.CTkLabel(config_win, text="Auto Refresh Manifests:", font=("Helvetica", 14)).pack(pady=10)
-        self.auto_refresh_var = ctk.BooleanVar(value=self.auto_refresh_enabled)
-        auto_refresh_check = ctk.CTkCheckBox(config_win, text="Enable Auto Refresh", variable=self.auto_refresh_var,
-                                              command=self.update_auto_refresh_setting)
-        auto_refresh_check.pack(pady=5)
-        ctk.CTkLabel(config_win, text="Refresh Interval (minutes):", font=("Helvetica", 12)).pack(pady=5)
-        self.refresh_interval_entry = ctk.CTkEntry(config_win, placeholder_text="e.g. 60")
-        self.refresh_interval_entry.insert(0, str(self.auto_refresh_interval))
-        self.refresh_interval_entry.pack(pady=5)
-        ctk.CTkButton(config_win, text="Open Library", command=self.library_window).pack(pady=5)
-        ctk.CTkButton(config_win, text="Export Log", command=self.export_log).pack(pady=5)
-        ctk.CTkButton(config_win, text="About", command=self.about_window).pack(pady=5)
-        ctk.CTkButton(config_win, text="Check for Updates", command=self.check_for_updates).pack(pady=5)
-        ctk.CTkButton(config_win, text="Backup Config", command=self.backup_config).pack(pady=(20, 5))
-        ctk.CTkButton(config_win, text="Restore Config", command=self.restore_config).pack(pady=5)
-        ctk.CTkLabel(config_win, text="Startup Options", font=("Helvetica", 14)).pack(pady=10)
+
+        # Open Library (experimental) button placed in a row.
+        library_frame = ctk.CTkFrame(config_win)
+        library_frame.pack(pady=5, fill="x")
+        open_lib_button = ctk.CTkButton(library_frame, text="Open Library (experimental)", command=self.library_window)
+        open_lib_button.grid(row=0, column=0, padx=5, pady=5)
+
+        # Donate button is in the top bar of the main window; no need here.
+
+        # Startup and Exit Behavior options.
+        startup_frame = ctk.CTkFrame(config_win)
+        startup_frame.pack(pady=5, fill="x")
+        ctk.CTkLabel(startup_frame, text="Run on Startup:", font=("Helvetica", 14)).grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.run_on_startup_var = ctk.BooleanVar(value=self.run_on_startup)
-        startup_checkbox = ctk.CTkCheckBox(config_win, text="Run on Startup", variable=self.run_on_startup_var, command=self.update_run_on_startup)
-        startup_checkbox.pack(pady=5)
-        ctk.CTkLabel(config_win, text="Exit Behavior:", font=("Helvetica", 14)).pack(pady=10)
-        exit_behavior_menu = ctk.CTkOptionMenu(config_win, values=["Minimize to Tray", "Exit on Close"],
+        startup_checkbox = ctk.CTkCheckBox(startup_frame, text="", variable=self.run_on_startup_var, command=self.update_run_on_startup)
+        startup_checkbox.grid(row=0, column=1, padx=5, pady=5)
+        ctk.CTkLabel(startup_frame, text="Exit Behavior:", font=("Helvetica", 14)).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        exit_behavior_menu = ctk.CTkOptionMenu(startup_frame, values=["Minimize to Tray", "Exit on Close"],
                                               command=lambda choice: self.set_exit_behavior(choice))
         exit_behavior_menu.set("Minimize to Tray" if self.exit_to_tray else "Exit on Close")
-        exit_behavior_menu.pack(pady=5)
+        exit_behavior_menu.grid(row=1, column=1, padx=5, pady=5)
+        
+       
+        
+
+        # Finally, arrange Reset Settings, Clear Cache, and View Recent Activities buttons side by side.
+        bottom_frame = ctk.CTkFrame(config_win)
+        bottom_frame.pack(pady=10, fill="x")
+        reset_button = ctk.CTkButton(bottom_frame, text="Reset Settings", command=self.reset_settings)
+        reset_button.grid(row=0, column=0, padx=5, pady=5)
+        clear_cache_button = ctk.CTkButton(bottom_frame, text="Clear Cache", command=self.clear_cache)
+        clear_cache_button.grid(row=0, column=1, padx=5, pady=5)
+        recent_button = ctk.CTkButton(bottom_frame, text="Recent Activities", command=self.view_recent_activities)
+        recent_button.grid(row=0, column=2, padx=5, pady=5)
 
     def toggle_advanced_options(self):
         if self.advanced_options_visible:
@@ -1160,17 +1144,6 @@ class SteamManagerApp:
         self.save_config()
         self.log(f"Minimalist mode set to {self.minimalist_mode}.")
         self.initialize_main_window()
-
-    def update_auto_refresh_setting(self):
-        self.auto_refresh_enabled = self.auto_refresh_var.get()
-        try:
-            self.auto_refresh_interval = int(self.refresh_interval_entry.get())
-        except ValueError:
-            self.auto_refresh_interval = 60
-        self.save_config()
-        if self.auto_refresh_enabled:
-            self.auto_refresh_manifest()
-        self.log(f"Auto Refresh set to {self.auto_refresh_enabled} every {self.auto_refresh_interval} minutes.")
 
     def set_exit_behavior(self, choice):
         self.exit_to_tray = (choice == "Minimize to Tray")
@@ -1236,14 +1209,15 @@ class SteamManagerApp:
             "  • Refresh Steam game manifests\n"
             "  • Search for games via the Steam API\n"
             "  • Manage your local game library (import/export, sort, favorites, open game folder)\n"
-            "  • Auto-refresh manifests\n"
             "  • Minimize to system tray\n"
             "  • Option to run on startup (Windows)\n"
             "  • Toggle Luma (renames greenluma files by appending a '1')\n"
             "  • Debug mode to enable/disable activity log\n"
             "  • Minimalist mode (only the sidebar is visible)\n"
             "  • Exit Behavior toggle (Minimize to Tray or Exit on Close)\n"
-            "  • Donate button in the top-right for donations to 0xFa1F17918319bEA39841F6891A4FC518b22C5738\n\n"
+            "  • Donate button in the top-right for donations to 0xFa1F17918319bEA39841F6891A4FC518b22C5738\n"
+            "  • Auto Dark Mode (switches theme based on time)\n"
+            "  • Reset Settings, Clear Cache, and View Recent Activities\n\n"
             "Developed by Your Name Here\n"
             "For updates and support, visit: https://your-update-url.example.com\n"
         )
@@ -1326,15 +1300,14 @@ class SteamManagerApp:
             "     • Click 'Details' to view extended game information.\n"
             "   - Search Game: Use the Steam API to search for games online, view short descriptions, and add them to the manifest.\n\n"
             "4. Library:\n"
-            "   - Scan Folder: Scans a folder (up to 500 executables) and adds them to your library.\n"
-            "   - Manual Add: Manually add a game by selecting its executable file.\n"
-            "   - Sorting, Filtering, Favorites, and Import/Export options are available in the Library window.\n\n"
+            "   - The Library function is available only in Settings as 'Open Library (experimental)'.\n\n"
             "5. Settings & Others:\n"
             "   - Settings: Change appearance, theme, add extra folders, and configure options.\n"
-            "       • Advanced Options: Toggle Luma, Debug Log, and Minimalist Mode.\n"
-            "       • Auto Refresh: Enable auto-refresh of manifests and set the interval.\n"
+            "       • Advanced Options: Contains checkboxes for Toggle Luma, Enable Debug Log, Minimalist Mode, Clear Cache, and View Recent Activities.\n"
+            "       • Auto Dark Mode: Automatically switches theme based on time.\n"
             "       • Startup Options: Choose to have Steam Manager run automatically when Windows starts.\n"
             "       • Exit Behavior: Choose between minimizing to tray or exiting on close.\n"
+            "       • Open Library (experimental) appears in Settings.\n"
             "   - Donate: Click the Donate button in the top-right to copy the donation address to your clipboard.\n"
             "   - Tutorial: View this help window at any time.\n"
             "   - Exit: Close the application (or minimize it to the system tray, if enabled).\n\n"
