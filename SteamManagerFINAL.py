@@ -675,28 +675,34 @@ class SteamManagerApp:
         loading = ctk.CTkToplevel(parent_win)
         loading.title("Searching")
         loading.geometry("250x120")
+        loading.transient(parent_win)
         loading.grab_set()
         ctk.CTkLabel(loading, text="Searching, please wait...").pack(padx=20, pady=(20,5))
         progress = ctk.CTkProgressBar(loading, mode="indeterminate")
         progress.pack(padx=20, pady=10, fill="x")
         progress.start()
-        loading.update()
-        try:
-            resp = requests.get(
-                "https://store.steampowered.com/api/storesearch",
-                params={"term": query, "cc": "us", "l": "en"},
-                timeout=10,
-            )
-            data = resp.json()
-            matches = data.get("items", [])[:20]
-            self.log(f"Found {len(matches)} matches for query '{query}'.")
-        except Exception as e:
+
+        def search_thread():
+            try:
+                resp = requests.get(
+                    "https://store.steampowered.com/api/storesearch",
+                    params={"term": query, "cc": "us", "l": "en"},
+                    timeout=10,
+                )
+                data = resp.json()
+                matches = data.get("items", [])[:20]
+                self.log(f"Found {len(matches)} matches for query '{query}'.")
+            except Exception as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: [loading.destroy(), messagebox.showerror("Error", f"Failed to search: {msg}")])
+                return
+            self.root.after(0, lambda: self.show_search_results(matches, results_frame, loading))
+
+        threading.Thread(target=search_thread, daemon=True).start()
+
+    def show_search_results(self, matches, results_frame, loading):
+        if loading.winfo_exists():
             loading.destroy()
-            messagebox.showerror("Error", f"Failed to search: {str(e)}")
-            return
-        finally:
-            if loading.winfo_exists():
-                loading.destroy()
         for widget in results_frame.winfo_children():
             widget.destroy()
         if not matches:
@@ -802,19 +808,22 @@ class SteamManagerApp:
         return details.get("name", "Unknown")
 
     def is_app_in_manifest(self, appid):
-        if not self.saved_main_path:
-            return False
-        output_folder = os.path.join(self.saved_main_path, "applist")
-        if not os.path.exists(output_folder):
-            return False
-        for f in os.listdir(output_folder):
-            if f.endswith(".txt") and f != "0.txt":
-                try:
-                    with open(os.path.join(output_folder, f), "r") as file:
-                        if file.read().strip() == str(appid):
-                            return True
-                except Exception:
-                    continue
+        folders = []
+        if self.saved_main_path:
+            folders.append(os.path.join(self.saved_main_path, "applist"))
+        for p in self.saved_paths:
+            folders.append(os.path.join(p, "applist"))
+        for folder in folders:
+            if not os.path.exists(folder):
+                continue
+            for f in os.listdir(folder):
+                if f.endswith(".txt") and f != "0.txt":
+                    try:
+                        with open(os.path.join(folder, f), "r") as file:
+                            if file.read().strip() == str(appid):
+                                return True
+                    except Exception:
+                        continue
         return False
 
 
