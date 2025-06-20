@@ -19,7 +19,9 @@ import pystray  # For system tray icon
 
 # Windows-specific imports for icon extraction and registry access.
 if os.name == "nt":
-    import win32ui, win32gui, win32con, win32api
+    import win32ui
+    import win32gui
+    import win32con
     import winreg  # For Run on Startup
 
 LIBRARY_FILE = "library.json"  # File to persist library items
@@ -478,6 +480,9 @@ class SteamManagerApp:
     # FUNCTIONALITY METHODS
     # ───────────────────────────────
     def open_steam(self):
+        if os.name != "nt":
+            messagebox.showerror("Error", "Opening Steam is supported only on Windows.")
+            return
         if self.saved_main_path:
             steam_exe = os.path.join(self.saved_main_path, "steam.exe")
             if os.path.exists(steam_exe):
@@ -500,6 +505,9 @@ class SteamManagerApp:
             self.log("Attempted to open Steam without a valid main path.")
 
     def close_steam(self):
+        if os.name != "nt":
+            messagebox.showerror("Error", "Closing Steam is supported only on Windows.")
+            return
         try:
             os.system("taskkill /f /im steam.exe")
             self.log("Steam closed.")
@@ -614,6 +622,9 @@ class SteamManagerApp:
         if not self.saved_main_path:
             messagebox.showerror("Error", "Main Steam path is not set.")
             self.log("Open Manifest Folder failed: no main Steam path.")
+            return
+        if os.name != "nt":
+            messagebox.showerror("Error", "Opening folders is supported only on Windows.")
             return
         output_folder = os.path.join(self.saved_main_path, "applist")
         if os.path.exists(output_folder):
@@ -770,7 +781,7 @@ class SteamManagerApp:
                     image_label = ctk.CTkLabel(result_frame, image=ct_image, text="")
                     image_label.image = ct_image
                     image_label.grid(row=0, column=0, rowspan=2, padx=5, pady=5)
-                except Exception as e:
+                except Exception:
                     ctk.CTkLabel(result_frame, text="No Image").grid(row=0, column=0, rowspan=2, padx=5, pady=5)
             else:
                 ctk.CTkLabel(result_frame, text="No Image").grid(row=0, column=0, rowspan=2, padx=5, pady=5)
@@ -964,7 +975,10 @@ class SteamManagerApp:
     def open_game_folder(self, game_path):
         folder = os.path.dirname(game_path)
         if os.path.exists(folder):
-            os.startfile(folder)
+            if os.name == "nt":
+                os.startfile(folder)
+            else:
+                messagebox.showerror("Error", "Opening folders is supported only on Windows.")
         else:
             messagebox.showerror("Error", "Folder not found.")
 
@@ -993,6 +1007,9 @@ class SteamManagerApp:
             self.log(f"Error exporting library: {str(e)}")
 
     def run_game(self, path):
+        if os.name != "nt":
+            messagebox.showerror("Error", "Launching games is supported only on Windows.")
+            return
         try:
             os.startfile(path)
             self.log(f"Running game: {path}")
@@ -1037,6 +1054,42 @@ class SteamManagerApp:
         except Exception as e:
             self.log(f"Error extracting icon from {exe_path}: {str(e)}")
             return None
+
+    def get_app_details(self, appid):
+        if appid in self.appid_cache:
+            return self.appid_cache[appid]
+        try:
+            resp = requests.get(
+                "https://store.steampowered.com/api/appdetails",
+                params={"appids": appid},
+                timeout=10,
+            )
+            data = resp.json()
+            details = data.get(str(appid), {}).get("data", {})
+            self.appid_cache[appid] = details
+            return details
+        except Exception as e:
+            self.log(f"Failed to fetch details for AppID {appid}: {str(e)}")
+            return {}
+
+    def get_game_name(self, appid):
+        details = self.get_app_details(appid)
+        return details.get("name", "Unknown")
+
+    def search_game_by_exe(self, query):
+        try:
+            resp = requests.get(
+                f"https://steamcommunity.com/actions/SearchApps/{query}",
+                timeout=5,
+            )
+            results = resp.json()
+            if results:
+                appid = results[0].get("appid")
+                if appid:
+                    return self.get_app_details(appid)
+        except Exception as e:
+            self.log(f"Search by exe failed for '{query}': {str(e)}")
+        return {}
 
     # ───────────────────────────────
     # SETTINGS WINDOW WITH ADVANCED OPTIONS (Buttons arranged side by side)
