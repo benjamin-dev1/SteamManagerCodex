@@ -33,7 +33,7 @@ class SteamManagerApp:
         # New settings.
         self.run_on_startup = False
         self.luma_toggled = False      # False: original names; True: files renamed (with a "1")
-        self.debug_mode = True         # Controls whether the activity log is shown
+        self.debug_mode = False        # Debug log disabled by default
         self.exit_to_tray = True       # When True, closing minimizes to tray; when False, it exits
         self.auto_dark_mode = False    # When True, automatically switch dark/light based on time
 
@@ -44,8 +44,7 @@ class SteamManagerApp:
 
         # Caches.
         self.appid_cache = {}
-        self.full_app_list = None
-        self.full_app_list_lower = None
+
 
         # (Auto-refresh features have been removed.)
 
@@ -297,12 +296,7 @@ class SteamManagerApp:
         for widget in self.root.winfo_children():
             widget.destroy()
 
-        # Top bar.
-        top_bar = ctk.CTkFrame(self.root, height=40, fg_color="transparent")
-        top_bar.pack(side="top", fill="x")
-        donate_button = ctk.CTkButton(top_bar, text="Donate", fg_color="orange",
-                                      command=self.donate, width=100, height=30)
-        donate_button.pack(side="right", padx=10, pady=5)
+        # Top bar removed; donate button now in sidebar
 
         # Sidebar.
         self.sidebar_frame = ctk.CTkFrame(self.root, width=240, corner_radius=10)
@@ -324,6 +318,7 @@ class SteamManagerApp:
         ctk.CTkButton(self.sidebar_frame, text="Settings", command=self.config_window, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Tutorial", command=self.tutorial_window, width=200).pack(pady=2)
         ctk.CTkButton(self.sidebar_frame, text="Exit", command=self.exit_app, width=200).pack(pady=2)
+        ctk.CTkButton(self.sidebar_frame, text="Donate", fg_color="orange", command=self.donate, width=200).pack(pady=2)
 
         # Main content area.
         self.content_frame = ctk.CTkFrame(self.root, corner_radius=10)
@@ -345,16 +340,8 @@ class SteamManagerApp:
                 remove_btn.pack(side="right", padx=5)
         else:
             ctk.CTkLabel(self.content_frame, text="No extra paths set", font=("Helvetica", 12)).pack(pady=5)
-        if self.debug_mode:
-            self.log_frame = ctk.CTkFrame(self.content_frame, corner_radius=10)
-            self.log_frame.pack(fill="both", expand=True, pady=(10,0), padx=5)
-            ctk.CTkLabel(self.log_frame, text="Activity Log:", font=("Helvetica", 14)).pack(pady=(5,0))
-            self.log_text = ctk.CTkTextbox(self.log_frame, width=600, height=150)
-            self.log_text.pack(pady=(5,5), padx=5, fill="both", expand=True)
-            ctk.CTkButton(self.log_frame, text="Clear Log", command=self.clear_log).pack(pady=(0,5))
-        else:
-            self.log_text = None
-            self.log_frame = None
+        self.log_text = None
+        self.log_frame = None
         self.log("Main window initialized.")
 
     def remove_manifest_path(self, path):
@@ -681,30 +668,26 @@ class SteamManagerApp:
         if not query:
             messagebox.showerror("Error", "Please enter a game name to search.")
             return
-        query_lower = query.lower()
-        self.log(f"Searching for query: '{query_lower}'")
-        if not self.full_app_list:
-            try:
-                r = requests.get("https://api.steampowered.com/ISteamApps/GetAppList/v2/", timeout=10)
-                self.full_app_list = r.json()
-                apps = self.full_app_list.get("applist", {}).get("apps", [])
-                self.log(f"Fetched app list with {len(apps)} apps.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to fetch app list: {str(e)}")
-                return
-        if self.full_app_list and self.full_app_list_lower is None:
-            apps = self.full_app_list.get("applist", {}).get("apps", [])
-            self.full_app_list_lower = [(str(app["appid"]), app["name"].lower(), app) for app in apps if "name" in app]
-        matches = [tup[2] for tup in self.full_app_list_lower if query_lower in tup[1]]
-        self.log(f"Found {len(matches)} matches for query '{query}'.")
-        matches = sorted(matches, key=lambda x: x["name"])[:20]
+        self.log(f"Searching for query: '{query}'")
+        try:
+            resp = requests.get(
+                "https://store.steampowered.com/api/storesearch",
+                params={"term": query, "cc": "us", "l": "en"},
+                timeout=10,
+            )
+            data = resp.json()
+            matches = data.get("items", [])[:20]
+            self.log(f"Found {len(matches)} matches for query '{query}'.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to search: {str(e)}")
+            return
         for widget in results_frame.winfo_children():
             widget.destroy()
         if not matches:
             ctk.CTkLabel(results_frame, text="No games found.", font=("Helvetica", 12)).pack(pady=10)
             return
         for app in matches:
-            appid = str(app["appid"])
+            appid = str(app.get("id", app.get("appid")))
             name = app["name"]
             result_frame = ctk.CTkFrame(results_frame)
             result_frame.pack(fill="x", pady=5, padx=5)
@@ -820,20 +803,7 @@ class SteamManagerApp:
         theme_option.set(self.saved_theme)
         theme_option.grid(row=1, column=1, padx=5, pady=5)
 
-        # Manifest Folder option.
-        manifest_frame = ctk.CTkFrame(config_win)
-        manifest_frame.pack(pady=5, fill="x")
-        ctk.CTkLabel(manifest_frame, text="Add Manifest Folder:", font=("Helvetica", 14)).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(manifest_frame, text="Add Folder", command=lambda: self.open_folder(config_win, is_main_path=False)).grid(row=0, column=1, padx=5, pady=5)
-
-        # Advanced Options (collapsible).
-        self.advanced_options_visible = False
-        self.advanced_options_frame = ctk.CTkFrame(config_win)
-        self.advanced_options_button = ctk.CTkButton(config_win, text="Show Advanced Options ▾", command=self.toggle_advanced_options)
-        self.advanced_options_button.pack(pady=5)
-
-
-        # Donate button is in the top bar of the main window; no need here.
+        # Donate button is in the sidebar of the main window; no need here.
 
         # Startup and Exit Behavior options.
         startup_frame = ctk.CTkFrame(config_win)
@@ -859,28 +829,7 @@ class SteamManagerApp:
         clear_cache_button = ctk.CTkButton(bottom_frame, text="Clear Cache", command=self.clear_cache)
         clear_cache_button.grid(row=0, column=1, padx=5, pady=5)
 
-    def toggle_advanced_options(self):
-        if self.advanced_options_visible:
-            self.advanced_options_frame.pack_forget()
-            self.advanced_options_button.configure(text="Show Advanced Options ▾")
-            self.advanced_options_visible = False
-        else:
-            self.advanced_options_frame.pack(pady=5, fill="x")
-            for child in self.advanced_options_frame.winfo_children():
-                child.destroy()
-            ctk.CTkLabel(self.advanced_options_frame, text="Advanced Options:", font=("Helvetica", 12, "bold")).pack(pady=(0,5))
-            self.debug_var = ctk.BooleanVar(value=self.debug_mode)
-            debug_check = ctk.CTkCheckBox(self.advanced_options_frame, text="Enable Debug Log", variable=self.debug_var,
-                                           command=lambda: self.set_debug_mode(self.debug_var.get()))
-            debug_check.pack(pady=2, anchor="w", padx=10)
-            self.advanced_options_button.configure(text="Hide Advanced Options ▴")
-            self.advanced_options_visible = True
 
-    def set_debug_mode(self, desired_state):
-        self.debug_mode = desired_state
-        self.save_config()
-        self.log(f"Debug mode set to {self.debug_mode}.")
-        self.initialize_main_window()
 
 
     def set_exit_behavior(self, choice):
@@ -949,9 +898,8 @@ class SteamManagerApp:
             "  • Minimize to system tray\n"
             "  • Option to run on startup (Windows)\n"
             "  • Toggle Luma (renames greenluma files by appending a '1')\n"
-            "  • Debug mode to enable/disable activity log\n"
             "  • Exit Behavior toggle (Minimize to Tray or Exit on Close)\n"
-            "  • Donate button in the top-right for donations to 0xFa1F17918319bEA39841F6891A4FC518b22C5738\n"
+            "  • Donate button below the Exit option for donations to 0xFa1F17918319bEA39841F6891A4FC518b22C5738\n"
             "  • Auto Dark Mode (switches theme based on time)\n"
             "  • Reset Settings and Clear Cache\n\n"
             "Developed by Your Name Here\n"
@@ -1037,11 +985,10 @@ class SteamManagerApp:
             "   - Search Game: Use the Steam API to search for games online, view short descriptions, and add them to the manifest.\n\n"
             "4. Settings & Others:\n"
             "   - Settings: Change appearance, theme, add extra folders, and configure options.\n"
-            "       • Advanced Options: Contains a checkbox for Enable Debug Log.\n"
             "       • Auto Dark Mode: Automatically switches theme based on time.\n"
             "       • Startup Options: Choose to have Steam Manager run automatically when Windows starts.\n"
             "       • Exit Behavior: Choose between minimizing to tray or exiting on close.\n"
-            "   - Donate: Click the Donate button in the top-right to copy the donation address to your clipboard.\n"
+            "   - Donate: Click the Donate button below the Exit option to copy the donation address to your clipboard.\n"
             "   - Tutorial: View this help window at any time.\n"
             "   - Exit: Close the application (or minimize it to the system tray, if enabled).\n\n"
             "Enjoy using Steam Manager!"
