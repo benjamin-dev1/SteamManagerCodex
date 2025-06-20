@@ -671,9 +671,15 @@ class SteamManagerApp:
             messagebox.showerror("Error", "Please enter a game name to search.")
             return
         self.log(f"Searching for query: '{query}'")
-        loading = ctk.CTkToplevel(self.root)
+        parent_win = results_frame.winfo_toplevel()
+        loading = ctk.CTkToplevel(parent_win)
         loading.title("Searching")
-        ctk.CTkLabel(loading, text="Searching, please wait...").pack(padx=20, pady=20)
+        loading.geometry("250x120")
+        loading.grab_set()
+        ctk.CTkLabel(loading, text="Searching, please wait...").pack(padx=20, pady=(20,5))
+        progress = ctk.CTkProgressBar(loading, mode="indeterminate")
+        progress.pack(padx=20, pady=10, fill="x")
+        progress.start()
         loading.update()
         try:
             resp = requests.get(
@@ -718,7 +724,10 @@ class SteamManagerApp:
             ctk.CTkLabel(result_frame, text=name, font=("Helvetica", 14), anchor="w").grid(row=0, column=1, sticky="w")
             toggle_btn = ctk.CTkButton(result_frame, text="▼", width=30)
             toggle_btn.grid(row=0, column=2, padx=5)
-            ctk.CTkButton(result_frame, text="Add to Manifest", command=lambda a=appid: self.add_game_to_manifest(a), width=120).grid(row=0, column=3, padx=5)
+            if self.is_app_in_manifest(appid):
+                ctk.CTkLabel(result_frame, text="Already Added", text_color="green").grid(row=0, column=3, padx=5)
+            else:
+                ctk.CTkButton(result_frame, text="Add to Manifest", command=lambda a=appid: self.add_game_to_manifest(a), width=120).grid(row=0, column=3, padx=5)
             result_frame.grid_columnconfigure(1, weight=1)
             def toggle_desc(btn=toggle_btn, appid=appid, parent=result_frame):
                 if not hasattr(btn, "desc_label"):
@@ -746,6 +755,10 @@ class SteamManagerApp:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to create manifest folder: {str(e)}")
                 return
+        if self.is_app_in_manifest(appid):
+            messagebox.showinfo("Already Added", f"AppID {appid} is already in the manifest list.")
+            self.log(f"Skipped adding AppID {appid}; already present in manifest.")
+            return
         next_number = self.get_next_manifest_number(output_folder)
         output_file = os.path.join(output_folder, f"{next_number}.txt")
         try:
@@ -787,6 +800,22 @@ class SteamManagerApp:
     def get_game_name(self, appid):
         details = self.get_app_details(appid)
         return details.get("name", "Unknown")
+
+    def is_app_in_manifest(self, appid):
+        if not self.saved_main_path:
+            return False
+        output_folder = os.path.join(self.saved_main_path, "applist")
+        if not os.path.exists(output_folder):
+            return False
+        for f in os.listdir(output_folder):
+            if f.endswith(".txt") and f != "0.txt":
+                try:
+                    with open(os.path.join(output_folder, f), "r") as file:
+                        if file.read().strip() == str(appid):
+                            return True
+                except Exception:
+                    continue
+        return False
 
 
     # ───────────────────────────────
