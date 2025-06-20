@@ -665,6 +665,8 @@ class SteamManagerApp:
         results_frame = ctk.CTkScrollableFrame(search_win, height=400)
         results_frame.pack(pady=10, padx=10, fill="both", expand=True)
         ctk.CTkButton(search_win, text="Search", command=lambda: self.perform_search(search_entry.get(), results_frame)).pack(pady=5)
+        search_entry.bind("<Return>", lambda _e: self.perform_search(search_entry.get(), results_frame))
+        search_entry.focus_set()
 
     def perform_search(self, query, results_frame):
         if not query:
@@ -672,11 +674,8 @@ class SteamManagerApp:
             return
         self.log(f"Searching for query: '{query}'")
         parent_win = results_frame.winfo_toplevel()
-        loading = ctk.CTkToplevel(parent_win)
-        loading.title("Searching")
-        loading.geometry("250x120")
-        loading.transient(parent_win)
-        loading.grab_set()
+        loading = ctk.CTkFrame(parent_win, corner_radius=10)
+        loading.place(relx=0.5, rely=0.5, anchor="center")
         ctk.CTkLabel(loading, text="Searching, please wait...").pack(padx=20, pady=(20,5))
         progress = ctk.CTkProgressBar(loading, mode="indeterminate")
         progress.pack(padx=20, pady=10, fill="x")
